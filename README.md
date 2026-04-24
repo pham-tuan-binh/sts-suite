@@ -19,8 +19,8 @@ Terminal debugger for Feetech STS3215 smart serial bus servos.
 ## Install
 
 ```bash
-git clone https://github.com/pham-tuan-binh/sts.git
-cd ./sts
+git clone https://github.com/pham-tuan-binh/sts-suite.git
+cd ./sts-suite
 uv sync
 ```
 
