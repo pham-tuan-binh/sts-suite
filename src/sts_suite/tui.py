@@ -167,6 +167,10 @@ class StsApp(App):
         self.session: Optional[Session] = session
         self._live_timer = None
         self._multi_selected: set[int] = set()
+        # True while a heavy overlay (oscilloscope / waveform / grid) is up —
+        # we suspend the live-tick reads so they don't queue behind the
+        # overlay's own bus traffic.
+        self._overlay_owns_bus = False
 
     # ------------ layout ------------
 
@@ -302,18 +306,36 @@ class StsApp(App):
         return bytes_to_uint(raw)
 
     def _read_block(self, sid: int, addr: int, length: int) -> Optional[bytes]:
+        """Bulk read with one retry on transient timeouts."""
         if self.session is None:
             return None
-        try:
-            data = self.session.bus.read_raw_data(sid, addr, length)
-        except Exception:
-            return None
-        return bytes(data)
+        for attempt in range(2):
+            try:
+                data = self.session.bus.read_raw_data(sid, addr, length)
+                return bytes(data)
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.01)
+                    continue
+                return None
+        return None
 
     def _schedule_live_tick(self) -> None:
-        if self.selected_id is None:
+        if self.selected_id is None or self._overlay_owns_bus:
             return
         self._tick_live_worker(self.selected_id)
+
+    def _push_bus_overlay(self, screen) -> None:
+        """Push a screen that drives its own continuous bus I/O."""
+        self._overlay_owns_bus = True
+
+        def _on_pop(_result) -> None:
+            self._overlay_owns_bus = False
+            if self.selected_id is not None:
+                # Refresh everything once we have the bus back.
+                self._refresh_all()
+
+        self.push_screen(screen, _on_pop)
 
     @work(thread=True, exclusive=True, group="live_read")
     def _tick_live_worker(self, sid: int) -> None:
@@ -522,46 +544,79 @@ class StsApp(App):
         return (mc.label.rstrip(":"), v, targets)
 
     def _write_reg(self, sid: int, reg: RegDef, value: int) -> None:
+        """Write a register, tolerating bus-timeout false negatives.
+
+        The STS3215's EEPROM cells take 3-5 ms to program and USB-to-serial
+        adapters add their own latency, so a "timeout" on write often means
+        the write succeeded but the status packet was late. We verify by
+        read-back (or rescan for ``id``) before reporting failure.
+        """
         if self.session is None:
             return
         eeprom = reg.addr <= EEPROM_END_ADDR
         data = uint_to_bytes(value, reg.length)
+        bus = self.session.bus
+
+        # Best-effort unlock for EEPROM. If this itself times out the real
+        # write usually still works, because the lock write was fast enough
+        # to reach the motor before the timeout fired.
+        if eeprom:
+            try:
+                bus.write_raw_data(sid, LOCK_ADDR, [0])
+                time.sleep(0.03)
+            except Exception:
+                pass
+
+        write_err: Optional[str] = None
         try:
-            if eeprom:
-                self.session.bus.write_raw_data(sid, LOCK_ADDR, [0])
-                time.sleep(0.02)
-            self.session.bus.write_raw_data(sid, reg.addr, data)
+            bus.write_raw_data(sid, reg.addr, data)
+        except Exception as e:  # noqa: BLE001
+            write_err = str(e)
 
-            if reg.name == "id":
-                # Give the servo time to latch the new ID before we try to
-                # talk to it again.
-                time.sleep(0.1)
-                self.session.rescan()
-                self._rebuild_motor_list(preferred_id=value)
-                if value in self.session.ids:
-                    try:
-                        self.session.bus.write_raw_data(value, LOCK_ADDR, [1])
-                    except Exception:
-                        pass
-                    self._status(f"ID changed {sid} -> {value}. Selected new ID.")
-                else:
-                    self._status(
-                        f"ID write sent ({sid} -> {value}) but motor didn't respond "
-                        f"at new ID. Try Rescan.",
-                        error=True,
-                    )
-                return
+        # Verify. For ``id`` we can't read from the old ID anymore, so fall
+        # back to a rescan - if the new ID pings, the write landed.
+        verified = False
+        if reg.name == "id":
+            time.sleep(0.1)
+            self.session.rescan()
+            verified = value in self.session.ids
+        else:
+            time.sleep(0.05)
+            readback = self._read_reg(sid, reg.addr, reg.length)
+            verified = readback is not None and int(readback) == int(value)
 
+        if not verified:
             if eeprom:
                 try:
-                    time.sleep(0.02)
-                    self.session.bus.write_raw_data(sid, LOCK_ADDR, [1])
+                    bus.write_raw_data(sid, LOCK_ADDR, [1])
                 except Exception:
                     pass
-            self._status(f"Wrote {reg.name} = {value}")
-            self._refresh_all()
-        except Exception as e:  # noqa: BLE001
-            self._status(f"Write failed: {e}", error=True)
+            self._status(
+                f"Write failed for {reg.name}" + (f": {write_err}" if write_err else ""),
+                error=True,
+            )
+            return
+
+        # Success. Special-case id because the rest of the app needs to know.
+        if reg.name == "id":
+            self._rebuild_motor_list(preferred_id=value)
+            try:
+                bus.write_raw_data(value, LOCK_ADDR, [1])
+            except Exception:
+                pass
+            tag = " (late ack)" if write_err else ""
+            self._status(f"ID changed {sid} -> {value}. Selected new ID.{tag}")
+            return
+
+        if eeprom:
+            try:
+                time.sleep(0.02)
+                bus.write_raw_data(sid, LOCK_ADDR, [1])
+            except Exception:
+                pass
+        tag = " (late ack)" if write_err else ""
+        self._status(f"Wrote {reg.name} = {value}{tag}")
+        self._refresh_all()
 
     # ------------ status ------------
 
@@ -681,18 +736,18 @@ class StsApp(App):
         if self.selected_id is None:
             self._status("Select a motor first", error=True)
             return
-        self.push_screen(OscilloscopeScreen(self, self.selected_id))
+        self._push_bus_overlay(OscilloscopeScreen(self, self.selected_id))
 
     def action_waveform(self) -> None:
         if self.selected_id is None:
             self._status("Select a motor first", error=True)
             return
-        self.push_screen(WaveformScreen(self, self.selected_id, self.mode))
+        self._push_bus_overlay(WaveformScreen(self, self.selected_id, self.mode))
 
     def action_grid_view(self) -> None:
         if self.session is None:
             return
-        self.push_screen(GridScreen(self))
+        self._push_bus_overlay(GridScreen(self))
 
     def action_diff(self) -> None:
         if self.session is None:

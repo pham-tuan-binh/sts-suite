@@ -26,7 +26,14 @@ def _first(result: Any) -> Any:
     return result
 
 
-def open_bus(port: str, baudrate: int, timeout_s: float = 0.02) -> Sts3215PyController:
+def open_bus(port: str, baudrate: int, timeout_s: float = 0.05) -> Sts3215PyController:
+    """Open the serial bus.
+
+    Default timeout is 50 ms: EEPROM writes can take 3-5 ms of cell
+    programming plus USB adapter latency (up to ~16 ms on CH340/FTDI),
+    so shorter timeouts spuriously fire on writes that actually succeed.
+    Full-range scans are still well under 15 s at this setting.
+    """
     return Sts3215PyController(
         serial_port=port, baudrate=baudrate, timeout=timeout_s
     )
