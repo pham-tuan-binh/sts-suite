@@ -488,25 +488,18 @@ class OscilloscopeScreen(Screen):
         session = getattr(self._app, "session", None)
         if session is None:
             return
+        # One bulk read from addr 56 (present_position) through addr 70
+        # (present_current high byte): 15 bytes covering everything we plot.
         try:
-            data = session.bus.read_raw_data(self.motor_id, PRESENT_POSITION_ADDR, 14)
+            buf = bytes(session.bus.read_raw_data(self.motor_id, PRESENT_POSITION_ADDR, 15))
         except Exception:
             return
-        # Offsets into block starting at PRESENT_POSITION_ADDR (56):
-        #   56-57 position (u16), 58-59 speed (u16 sign-mag),
-        #   60-61 load (u16 sign-mag), 62 volt, 63 temp (ignored),
-        #   64 status, 65 moving, 66-67 reserved, 68-69 current? (we read 14 to be safe)
-        # present_current is at 69, so we'd need addr 56..70. Read 15 bytes.
-        # Redo with correct length below.
-        try:
-            data2 = session.bus.read_raw_data(self.motor_id, PRESENT_POSITION_ADDR, 15)
-        except Exception:
+        if len(buf) < 15:
             return
-        buf = bytes(data2)
         pos = int.from_bytes(buf[0:2], "little", signed=False)
         spd_raw = int.from_bytes(buf[2:4], "little", signed=False)
         load_raw = int.from_bytes(buf[4:6], "little", signed=False)
-        # buf[6..12] = volt/temp/status/moving/reserved
+        # buf[6]=volt, buf[7]=temp, buf[8]=status, buf[9]=moving, buf[10..12]=reserved
         cur = int.from_bytes(buf[13:15], "little", signed=False)
 
         t = time.monotonic() - self._t0

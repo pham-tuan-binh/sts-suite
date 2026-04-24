@@ -244,7 +244,7 @@ class StsApp(App):
 
     # ------------ motor list ------------
 
-    def _rebuild_motor_list(self) -> None:
+    def _rebuild_motor_list(self, preferred_id: Optional[int] = None) -> None:
         if self.session is None:
             return
         lst = self.query_one("#motor_list", ListView)
@@ -253,8 +253,12 @@ class StsApp(App):
         for sid in self.session.ids:
             lst.append(MotorItem(sid))
         if self.session.ids:
-            self.selected_id = self.session.ids[0]
-            lst.index = 0
+            if preferred_id is not None and preferred_id in self.session.ids:
+                target = preferred_id
+            else:
+                target = self.session.ids[0]
+            self.selected_id = target
+            lst.index = self.session.ids.index(target)
             self._refresh_all()
         else:
             self.selected_id = None
@@ -529,16 +533,23 @@ class StsApp(App):
             self.session.bus.write_raw_data(sid, reg.addr, data)
 
             if reg.name == "id":
-                time.sleep(0.05)
+                # Give the servo time to latch the new ID before we try to
+                # talk to it again.
+                time.sleep(0.1)
                 self.session.rescan()
-                self._rebuild_motor_list()
+                self._rebuild_motor_list(preferred_id=value)
                 if value in self.session.ids:
-                    self.selected_id = value
                     try:
                         self.session.bus.write_raw_data(value, LOCK_ADDR, [1])
                     except Exception:
                         pass
-                self._status(f"ID changed {sid} -> {value}. Bus rescanned.")
+                    self._status(f"ID changed {sid} -> {value}. Selected new ID.")
+                else:
+                    self._status(
+                        f"ID write sent ({sid} -> {value}) but motor didn't respond "
+                        f"at new ID. Try Rescan.",
+                        error=True,
+                    )
                 return
 
             if eeprom:
