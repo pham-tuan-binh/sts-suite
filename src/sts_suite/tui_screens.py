@@ -242,7 +242,7 @@ class EditRegScreen(ModalScreen[Optional[int]]):
     }
     #reg_meta { color: $text-muted; }
     #reg_desc { color: $text-muted; margin: 1 0; }
-    #eeprom_warning { color: $warning; margin-top: 1; }
+    .warning-line { color: $warning; margin-top: 1; }
     #edit_input { margin-top: 1; }
     #edit_radio { margin-top: 1; }
     #buttons { height: auto; margin-top: 1; }
@@ -268,9 +268,11 @@ class EditRegScreen(ModalScreen[Optional[int]]):
             if self.reg.description:
                 yield Static(self.reg.description, id="reg_desc")
             if self.reg.addr <= EEPROM_END_ADDR:
-                yield Label("[!] EEPROM: writes auto-unlock and re-lock", id="eeprom_warning")
+                yield Label("[!] EEPROM: writes auto-unlock and re-lock",
+                            classes="warning-line")
             if self.reg.name == "id":
-                yield Label("[!] changing ID triggers a bus rescan", id="eeprom_warning")
+                yield Label("[!] changing ID triggers a bus rescan",
+                            classes="warning-line")
 
             if self.reg.options:
                 with RadioSet(id="edit_radio"):
