@@ -34,22 +34,6 @@ If no motors respond, hit `Baud sweep` in the port picker and it will try every 
 
 ## Main screen
 
-```
-+---- sts-suite -- /dev/cu.XXX @ 1,000,000 -------------------------+
-| MOTORS          | Registers for motor id=4 -- position (servo)   |
-| [*] id=4        | pos=972  goal=972  spd=0  load=0  V=5.2 T=28C  |
-| [ ] id=7        | torque=ON  status=ok                           |
-|                 |------------------------------------------------|
-| [Rescan]        | present_position   972      56   2   R         |
-|                 | goal_position      972      42   2   RW        |
-|                 | present_speed      0 = +0   58   2   R         |
-|                 | ... (26 rows, live-refreshed)                  |
-|                 |                                                |
-|                 | goal: [____] [Set] [Torque] [Reboot] [E-STOP]  |
-|                 | status line                                    |
-+-----------------+------------------------------------------------+
-```
-
 Left sidebar: motors on the bus. Toggle multi-select with `ctrl+space`; goal and nudge then drive the whole selection via `sync_write` in one packet.
 
 Right side: a watch strip with the always-visible vitals, then the full register table. `Enter` on any RW row pops an edit modal with a description, range, units, and a dropdown for enum registers.
@@ -109,20 +93,7 @@ Bit flags decoded in the register table and watch strip.
 
 ## Snapshot file
 
-`s` writes `./sts-state-YYYYMMDD-HHMMSS.json`:
-
-```json
-{
-  "timestamp": "20260424-180821",
-  "port": "/dev/cu.usbserial-XYZ",
-  "baud": 1000000,
-  "motors": {
-    "4": { "present_position": 972, "goal_position": 972, "..." : "..." }
-  }
-}
-```
-
-Load one with `d` to diff against live readings.
+`s` writes `sts-state-YYYYMMDD-HHMMSS.json` in the current directory with every register value for every motor on the bus. Load one with `d` to diff against the current live readings.
 
 ## Preset file
 
