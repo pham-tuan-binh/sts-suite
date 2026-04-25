@@ -45,9 +45,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pham-tuan-binh/sts"
-Repository = "https://github.com/pham-tuan-binh/sts"
-Issues = "https://github.com/pham-tuan-binh/sts/issues"
+Homepage = "https://github.com/pham-tuan-binh/sts-suite"
+Repository = "https://github.com/pham-tuan-binh/sts-suite"
+Issues = "https://github.com/pham-tuan-binh/sts-suite/issues"
 
 [project.scripts]
 sts = "sts_suite.cli:main"
