@@ -9,7 +9,7 @@
 Terminal debugger for Feetech STS3215 smart serial bus servos.
 
 <!-- Screenshot goes here -->
-![screenshot](docs/screenshot.png)
+![screenshot](https://raw.githubusercontent.com/pham-tuan-binh/sts-suite/main/docs/screenshot.png)
 
 ## Requirements
 
@@ -18,16 +18,22 @@ Terminal debugger for Feetech STS3215 smart serial bus servos.
 
 ## Install
 
+With [uv](https://docs.astral.sh/uv/):
+
 ```bash
-git clone https://github.com/pham-tuan-binh/sts-suite.git
-cd ./sts-suite
-uv sync
+uv tool install sts-suite
+```
+
+Or with pip:
+
+```bash
+pip install sts-suite
 ```
 
 ## Run
 
 ```bash
-uv run sts
+sts
 ```
 
 Pick a serial port and baud rate. The debugger opens. The last choice is saved to `~/.cache/sts-suite/last.json`.
