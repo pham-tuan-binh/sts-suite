@@ -39,6 +39,7 @@ from .tui_meta import (
     EEPROM_END_ADDR,
     GOAL_POSITION_ADDR,
     GOAL_SPEED_ADDR,
+    MODE_EXTENDED,
     MODE_POSITION,
     MODE_WHEEL,
     PRESENT_CURRENT_ADDR,
@@ -50,6 +51,8 @@ from .tui_meta import (
     RegDef,
     load_last_port,
     mode_ctrl,
+    pos_raw_to_signed,
+    pos_signed_to_raw,
     speed_raw_to_signed,
     speed_signed_to_raw,
     uint_to_bytes,
@@ -354,6 +357,8 @@ HELP_TEXT = """\
   k / j        nudge +5 / -5 (auto-scales per mode)
   l / h        nudge +50 / -50
   c            center: goal -> 2048 or speed -> 0
+  e            toggle extended (multi-turn) position mode
+  z            zero: set current pose as center (2048)
   t            toggle torque on selected
   !            E-STOP: disable torque on ALL motors (broadcast)
   Ctrl+R       reboot selected motor
@@ -445,10 +450,11 @@ class OscilloscopeScreen(Screen):
 
     WINDOW = 200  # samples
 
-    def __init__(self, app_ref, motor_id: int):
+    def __init__(self, app_ref, motor_id: int, mode: int = MODE_POSITION):
         super().__init__()
         self._app = app_ref
         self.motor_id = motor_id
+        self.mode = mode
         self.paused = False
         self._t0 = time.monotonic()
         self._t: deque[float] = deque(maxlen=self.WINDOW)
@@ -497,6 +503,8 @@ class OscilloscopeScreen(Screen):
         if len(buf) < 15:
             return
         pos = int.from_bytes(buf[0:2], "little", signed=False)
+        if self.mode == MODE_EXTENDED:
+            pos = pos_raw_to_signed(pos)
         spd_raw = int.from_bytes(buf[2:4], "little", signed=False)
         load_raw = int.from_bytes(buf[4:6], "little", signed=False)
         # buf[6]=volt, buf[7]=temp, buf[8]=status, buf[9]=moving, buf[10..12]=reserved
@@ -647,7 +655,9 @@ class WaveformScreen(ModalScreen[None]):
             try:
                 if mc.target == "position":
                     reg = REG_BY_NAME["goal_position"]
-                    if mc.signed:
+                    if self.mode == MODE_EXTENDED:
+                        data = uint_to_bytes(pos_signed_to_raw(int(v)), reg.length)
+                    elif mc.signed:
                         data = list(int(v).to_bytes(reg.length, "little", signed=True))
                     else:
                         data = uint_to_bytes(v, reg.length)

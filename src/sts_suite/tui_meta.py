@@ -72,11 +72,16 @@ REGISTERS: list[RegDef] = [
            description="Max torque output (0-1000 = 0-100%).",
            units="x0.1%", max_value=1000),
     RegDef("min_angle_limit", 9, 2, rw=True,
-           description="Lower position limit. Set BOTH limits to 0 for wheel mode.",
+           description="Lower position limit. Set BOTH limits to 0 for wheel/extended mode.",
            units="steps", max_value=4095),
     RegDef("max_angle_limit", 11, 2, rw=True,
-           description="Upper position limit. Set BOTH limits to 0 for wheel mode.",
+           description="Upper position limit. Set BOTH limits to 0 for wheel/extended mode.",
            units="steps", max_value=4095),
+    RegDef("phase", 18, 1, rw=True,
+           description=("Phase/correction flags. BIT4 (0x10) = multi-turn position "
+                        "feedback: present_position accumulates across turns instead "
+                        "of wrapping at 4095. Set for extended position mode."),
+           max_value=255),
     RegDef("mode", 33, 1, rw=True,
            description=("Operating mode. Changes how goal_position / goal_speed are "
                         "interpreted. The control bar adapts automatically."),
@@ -171,6 +176,15 @@ MODE_POSITION = 0
 MODE_WHEEL = 1
 MODE_PWM = 2
 MODE_STEP = 3
+# Virtual mode: not a value of the `mode` register. The motor stays in mode 0
+# (position servo) but with both angle limits = 0 and phase BIT4 set, which
+# turns it into signed multi-turn position control. Derived via effective_mode().
+MODE_EXTENDED = 100
+
+# Multi-turn config. phase BIT4 enables accumulating position feedback; the
+# STS3215 covers +-7 turns at full precision => +-7 * 4096 = +-28672 steps.
+MULTITURN_PHASE_BIT = 0x10
+MULTITURN_MAX = 28672
 
 
 @dataclass
@@ -210,11 +224,37 @@ MODE_CONTROLS: dict[int, ModeControl] = {
         min_val=-32768, max_val=32767, nudge_scale=20,
         pretty_name="step",
     ),
+    MODE_EXTENDED: ModeControl(
+        label="goal:", placeholder=f"-{MULTITURN_MAX}..{MULTITURN_MAX} (multi-turn)",
+        target="position", signed=True,
+        min_val=-MULTITURN_MAX, max_val=MULTITURN_MAX, nudge_scale=1,
+        pretty_name="extended (multi-turn)",
+    ),
 }
 
 
 def mode_ctrl(mode: int) -> ModeControl:
     return MODE_CONTROLS.get(mode, MODE_CONTROLS[MODE_POSITION])
+
+
+def effective_mode(
+    mode: int, min_angle: int, max_angle: int, phase: int
+) -> int:
+    """Resolve the *effective* control mode from raw registers.
+
+    The motor reports ``mode == 0`` (position servo) both for ordinary
+    single-turn control and for extended multi-turn control. They differ
+    only by the angle limits being zeroed and phase BIT4 being set, so we
+    surface MODE_EXTENDED as a virtual mode when that combination holds.
+    """
+    if (
+        mode == MODE_POSITION
+        and min_angle == 0
+        and max_angle == 0
+        and (phase & MULTITURN_PHASE_BIT)
+    ):
+        return MODE_EXTENDED
+    return mode
 
 
 # ============================================================================
@@ -240,6 +280,20 @@ def speed_signed_to_raw(signed: int) -> int:
 
 
 def speed_raw_to_signed(raw: int) -> int:
+    mag = raw & 0x7FFF
+    return -mag if (raw & 0x8000) else mag
+
+
+# Multi-turn position uses the same Feetech sign-magnitude layout as speed:
+# bit 15 is the direction sign, bits 0-14 the magnitude. It is NOT two's
+# complement, so a small negative position like -6 reads as 0x8006, which a
+# two's-complement decode would mangle into -32762.
+def pos_signed_to_raw(signed: int) -> int:
+    mag = abs(signed) & 0x7FFF
+    return mag | (0x8000 if signed < 0 else 0)
+
+
+def pos_raw_to_signed(raw: int) -> int:
     mag = raw & 0x7FFF
     return -mag if (raw & 0x8000) else mag
 

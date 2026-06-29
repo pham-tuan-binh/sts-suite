@@ -112,20 +112,69 @@ def set_torque(bus: Sts3215PyController, servo_id: int, enabled: bool) -> None:
     bus.write_raw_torque_enable(servo_id, 1 if enabled else 0)
 
 
+# Multi-turn ("extended position") config. The STS3215 has no dedicated mode
+# register value for this: it stays in mode 0 but with both angle limits = 0
+# and phase BIT4 set, which makes goal/present position signed and lets it span
+# +-7 turns (+-28672 steps). Not retained across power cycles.
+MULTITURN_PHASE_BIT = 0x10
+
+
+def set_extended_position(
+    bus: Sts3215PyController, servo_id: int, enable: bool
+) -> None:
+    """Enable or disable extended (multi-turn) position mode.
+
+    Enabling zeroes both angle limits and sets phase BIT4. Disabling restores
+    the single-turn defaults (0-4095) and clears the bit. Torque is dropped
+    while reconfiguring because angle-limit changes can snap the goal.
+    """
+    set_torque(bus, servo_id, False)
+    bus.write_mode(servo_id, 0)
+    phase = _first(bus.read_phase(servo_id))
+    if enable:
+        bus.write_raw_min_angle_limit(servo_id, 0)
+        bus.write_raw_max_angle_limit(servo_id, 0)
+        bus.write_phase(servo_id, phase | MULTITURN_PHASE_BIT)
+    else:
+        bus.write_raw_min_angle_limit(servo_id, POSITION_MIN)
+        bus.write_raw_max_angle_limit(servo_id, POSITION_MAX)
+        bus.write_phase(servo_id, phase & ~MULTITURN_PHASE_BIT)
+
+
+def calibrate_midpoint(bus: Sts3215PyController, servo_id: int) -> None:
+    """Zero the motor: set the current physical position as center (2048).
+
+    Writing 128 (0x80) to Torque_Enable is the Feetech "set middle position"
+    command; the servo stores the matching offset so present_position reads
+    ~2048 at the current pose.
+    """
+    bus.write_raw_torque_enable(servo_id, 128)
+
+
 def move_to(
     bus: Sts3215PyController,
     servo_id: int,
     goal_raw: int,
     speed_raw: int = 500,
     acceleration_raw: int = 30,
+    pos_min: int = POSITION_MIN,
+    pos_max: int = POSITION_MAX,
 ) -> None:
-    """Commands an absolute position move in speed-based mode."""
-    goal_raw = max(POSITION_MIN, min(POSITION_MAX, goal_raw))
+    """Commands an absolute position move in speed-based mode.
+
+    ``pos_min``/``pos_max`` bound the goal. For extended (multi-turn) mode pass
+    a signed range (e.g. -+28672); negative goals are written in Feetech
+    sign-magnitude (bit 15 = sign), which is how goal_position is encoded.
+    """
+    goal_raw = int(max(pos_min, min(pos_max, goal_raw)))
     bus.write_acceleration(servo_id, acceleration_raw)
     # goal_time must be 0 for speed-based motion; otherwise goal_speed is ignored.
     bus.write_goal_time(servo_id, 0)
     bus.write_raw_goal_speed(servo_id, speed_raw)
-    bus.write_raw_goal_position(servo_id, goal_raw)
+    # Sign-magnitude, not two's complement: bit 15 carries the sign and the
+    # low 15 bits the magnitude. Positive single-turn goals are unchanged.
+    wire = (abs(goal_raw) & 0x7FFF) | (0x8000 if goal_raw < 0 else 0)
+    bus.write_raw_goal_position(servo_id, wire)
 
 
 def read_present_position(bus: Sts3215PyController, servo_id: int) -> int:

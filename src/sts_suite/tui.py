@@ -38,7 +38,9 @@ from .tui_meta import (
     EEPROM_BLOCK_START,
     EEPROM_END_ADDR,
     LOCK_ADDR,
+    MODE_EXTENDED,
     MODE_POSITION,
+    MULTITURN_MAX,
     REG_BY_NAME,
     REGISTERS,
     RegDef,
@@ -49,9 +51,12 @@ from .tui_meta import (
     TORQUE_ENABLE_ADDR,
     bytes_to_uint,
     decode_status,
+    effective_mode,
     int_to_bytes_signed,
     load_last_port,
     mode_ctrl,
+    pos_raw_to_signed,
+    pos_signed_to_raw,
     save_last_port,
     speed_raw_to_signed,
     speed_signed_to_raw,
@@ -143,6 +148,8 @@ class StsApp(App):
         Binding("space", "refresh_all", "Refresh"),
         Binding("g", "focus_goal", "Goal"),
         Binding("c", "center", "Center"),
+        Binding("e", "extended", "Extend"),
+        Binding("z", "zero", "Zero"),
         Binding("k", "nudge(5)", "+5"),
         Binding("j", "nudge(-5)", "-5"),
         Binding("l", "nudge(50)", "+50"),
@@ -367,8 +374,8 @@ class StsApp(App):
         def u16(off: int) -> int: return int.from_bytes(block[off:off+2], "little", signed=False)
         try:
             torque = block[0]              # 40
-            goal = u16(2)                  # 42
-            pos = u16(16)                  # 56
+            goal = self._pos_signed(u16(2))    # 42
+            pos = self._pos_signed(u16(16))    # 56
             spd = speed_raw_to_signed(u16(18))   # 58
             load = speed_raw_to_signed(u16(20))  # 60
             volt = block[22]               # 62
@@ -428,25 +435,48 @@ class StsApp(App):
                     )
             return None
 
-        new_mode: Optional[int] = None
+        raw_vals: dict[str, Optional[int]] = {}
         for row, reg in enumerate(REGISTERS):
             val = _from_block(reg)
             if val is None:
                 val = self._read_reg(sid, reg.addr, reg.length)
             self._update_row(row, reg, val)
-            if reg.name == "mode" and val is not None:
-                new_mode = val
-        if new_mode is not None:
-            self.mode = new_mode
+            raw_vals[reg.name] = val
+        if raw_vals.get("mode") is not None:
+            self.mode = effective_mode(
+                raw_vals["mode"],
+                raw_vals.get("min_angle_limit") or 0,
+                raw_vals.get("max_angle_limit") or 0,
+                raw_vals.get("phase") or 0,
+            )
         self._update_title()
         if sram is not None:
             self._update_watch_strip(sram)
 
     # ------------ cell rendering ------------
 
+    def _pos_signed(self, raw: int) -> int:
+        """Reinterpret a raw position register for the current control mode.
+
+        Extended (multi-turn) mode uses Feetech sign-magnitude encoding (bit 15
+        is the direction sign); plain two's-complement would turn a position of
+        -6 into -32762. Step mode keeps the two's-complement i16 it was using.
+        """
+        mc = mode_ctrl(self.mode)
+        if self.mode == MODE_EXTENDED:
+            return pos_raw_to_signed(raw)
+        if mc.target == "position" and mc.signed:
+            return int.from_bytes(
+                raw.to_bytes(2, "little", signed=False), "little", signed=True
+            )
+        return raw
+
     def _format_cell(self, reg: RegDef, raw_value: Optional[int]) -> str:
         if raw_value is None:
             return "err"
+        if reg.name in ("present_position", "goal_position"):
+            signed = self._pos_signed(raw_value)
+            return f"{signed:+d}" if signed != raw_value else str(raw_value)
         if reg.name == "status":
             tags, _ = decode_status(raw_value)
             return f"{raw_value}  [red]{'|'.join(tags)}[/red]" if tags else f"{raw_value}  ok"
@@ -516,7 +546,9 @@ class StsApp(App):
 
         if mc.target == "position":
             reg = REG_BY_NAME["goal_position"]
-            if mc.signed:
+            if self.mode == MODE_EXTENDED:
+                data = uint_to_bytes(pos_signed_to_raw(v), reg.length)
+            elif mc.signed:
                 data = int_to_bytes_signed(v, reg.length)
             else:
                 data = uint_to_bytes(v, reg.length)
@@ -685,8 +717,10 @@ class StsApp(App):
                 signed = speed_raw_to_signed(int(cur_raw)) if mc.signed else int(cur_raw)
                 new_val = max(mc.min_val, min(mc.max_val, signed + base * mc.nudge_scale))
             else:
-                if self.mode == MODE_POSITION:
-                    cur = m.read_present_position(self.session.bus, sid)
+                if self.mode in (MODE_POSITION, MODE_EXTENDED):
+                    cur = self._pos_signed(
+                        m.read_present_position(self.session.bus, sid)
+                    )
                 else:
                     raw = int(m._first(self.session.bus.read_raw_goal_position(sid)))
                     cur = int.from_bytes(
@@ -716,6 +750,37 @@ class StsApp(App):
         except Exception as e:  # noqa: BLE001
             self._status(f"Center failed: {e}", error=True)
 
+    def action_extended(self) -> None:
+        """Toggle extended (multi-turn) position mode on the cursor motor."""
+        sid = self.selected_id
+        if sid is None or self.session is None:
+            return
+        enable = self.mode != MODE_EXTENDED
+        try:
+            m.set_extended_position(self.session.bus, sid, enable)
+            self._status(
+                f"Extended position {'ON' if enable else 'OFF'} for id={sid}"
+                + (f"  (goal range +-{MULTITURN_MAX})" if enable else "")
+            )
+            self._refresh_all()
+        except Exception as e:  # noqa: BLE001
+            self._status(f"Extended toggle failed: {e}", error=True)
+
+    def action_zero(self) -> None:
+        """Set the current physical position as the motor's center (2048)."""
+        sid = self.selected_id
+        if sid is None or self.session is None:
+            return
+        try:
+            m.calibrate_midpoint(self.session.bus, sid)
+            self._status(
+                f"Zeroed id={sid}: current pose is now center (2048). "
+                "Re-enable torque to hold."
+            )
+            self._refresh_all()
+        except Exception as e:  # noqa: BLE001
+            self._status(f"Zero failed: {e}", error=True)
+
     def action_focus_goal(self) -> None:
         self.query_one("#goal_input", Input).focus()
 
@@ -736,7 +801,7 @@ class StsApp(App):
         if self.selected_id is None:
             self._status("Select a motor first", error=True)
             return
-        self._push_bus_overlay(OscilloscopeScreen(self, self.selected_id))
+        self._push_bus_overlay(OscilloscopeScreen(self, self.selected_id, self.mode))
 
     def action_waveform(self) -> None:
         if self.selected_id is None:
